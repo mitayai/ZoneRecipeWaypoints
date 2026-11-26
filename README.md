@@ -39,3 +39,8 @@ folder name `ZoneRecipeWaypoints`.
 | `/zrw max N` | Most waypoints per zone, 1 to 60 (default 12) |
 | `/zrw quiet` | Toggle chat messages |
 | `/zrw clear` | Remove the waypoints |
+
+## License
+
+[MIT](LICENSE). RecipeRadar and TomTom are separate addons under their own terms; none of their
+code or data is included here.
