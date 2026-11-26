@@ -1,0 +1,9 @@
+## Interface: 16001
+## Title: ZoneRecipeWaypoints
+## Notes: On entering a zone, sets TomTom waypoints for the trainers and vendors there that teach or sell recipes your professions are missing. Uses the RecipeRadar database.
+## Dependencies: RecipeRadar
+## OptionalDeps: TomTom
+## SavedVariables: ZoneRecipeWaypointsDB
+## Version: 1.0.0
+
+ZoneRecipeWaypoints.lua
