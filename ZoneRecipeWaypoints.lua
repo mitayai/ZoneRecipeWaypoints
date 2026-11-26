@@ -3,6 +3,7 @@
 local ADDON = "ZoneRecipeWaypoints"
 local RR = _G.RecipeRadar
 local PREFIX = "|cff33ccff" .. ADDON .. "|r: "
+local MAX_LABEL_RECIPES = 6
 
 local defaults = { enabled = true, learnableOnly = true, max = 12, verbose = true }
 local placed = {}
@@ -26,8 +27,9 @@ local function ClearWaypoints()
     wipe(placed)
 end
 
--- Adds every npc id in a source list to the zone's candidate table
-local function CollectNpcs(list, zoneId, ownFaction, out, prof)
+-- Adds every npc id in a source list to the zone's candidate table.
+-- pickup = { key, name, skill } describes the recipe this npc offers.
+local function CollectNpcs(list, zoneId, ownFaction, out, prof, pickup)
     if type(list) ~= "table" then return end
     for _, npcId in ipairs(list) do
         local npc = RR.DB:GetNPC(npcId)
@@ -40,10 +42,14 @@ local function CollectNpcs(list, zoneId, ownFaction, out, prof)
             if npcZone == zoneId and not hostile and x and y then
                 local entry = out[npcId]
                 if not entry then
-                    entry = { npc = npc, x = x, y = y, count = 0, profs = {} }
+                    entry = { npc = npc, x = x, y = y, profs = {}, seen = {}, pickups = {} }
                     out[npcId] = entry
                 end
-                entry.count = entry.count + 1
+                -- one npc can be listed twice for a recipe (recipe and recipe item)
+                if not entry.seen[pickup.key] then
+                    entry.seen[pickup.key] = true
+                    entry.pickups[#entry.pickups + 1] = pickup
+                end
                 entry.profs[prof] = true
             end
         end
@@ -53,6 +59,82 @@ end
 local function SourceList(src)
     if type(src) ~= "table" then return nil end
     return src.sources or src
+end
+
+-- Waypoint label: npc and professions, then one line per recipe to pick up there
+local function BuildTitle(entry)
+    local profNames = {}
+    for p in pairs(entry.profs) do profNames[#profNames + 1] = p end
+    table.sort(profNames)
+    table.sort(entry.pickups, function(a, b)
+        if (a.skill or 0) ~= (b.skill or 0) then return (a.skill or 0) < (b.skill or 0) end
+        return a.name < b.name
+    end)
+
+    local lines = { string.format("%s (%s)", RR.DB:GetLocalizedText(entry.npc.name), table.concat(profNames, ", ")) }
+    for i = 1, math.min(#entry.pickups, MAX_LABEL_RECIPES) do
+        local p = entry.pickups[i]
+        lines[#lines + 1] = p.skill and string.format("%s (%d)", p.name, p.skill) or p.name
+    end
+    if #entry.pickups > MAX_LABEL_RECIPES then
+        lines[#lines + 1] = string.format("+%d more", #entry.pickups - MAX_LABEL_RECIPES)
+    end
+    return table.concat(lines, "\n")
+end
+
+-- True when the client itself says this character already has the spell or recipe
+local function ClientKnows(spellId)
+    if not spellId then return false end
+    local isKnown = (C_SpellBook and C_SpellBook.IsSpellKnown) or IsPlayerSpell
+    if isKnown then
+        local ok, known = pcall(isKnown, spellId)
+        if ok and known == true then return true end
+    end
+    if C_TradeSkillUI and C_TradeSkillUI.GetRecipeInfo then
+        local ok, learned = pcall(function() return C_TradeSkillUI.GetRecipeInfo(spellId).learned == true end)
+        if ok and learned then return true end
+    end
+    return false
+end
+
+-- True when the teaching item is already in this character's bags or bank
+local function HasRecipeItem(recipe)
+    local count = (C_Item and C_Item.GetItemCount) or GetItemCount
+    if not count or type(recipe.items) ~= "table" then return false end
+    for _, itemId in ipairs(recipe.items) do
+        local ok, n = pcall(count, itemId, true)
+        if ok and (tonumber(n) or 0) > 0 then return true end
+    end
+    return false
+end
+
+local function ClassAllowed(recipe)
+    if type(recipe.classes) ~= "table" then return true end
+    local _, class = UnitClass("player")
+    for _, c in ipairs(recipe.classes) do
+        if c:upper():gsub("%s", "") == class then return true end
+    end
+    return false
+end
+
+-- True only for a recipe this character can still use and does not have yet
+local function IsNeeded(prof, recipe, spellId, name)
+    if RR.Scanner:IsRecipeKnown(prof, spellId, name) or ClientKnows(spellId) then return false end
+    if not ClassAllowed(recipe) then return false end
+    if recipe.specialisation and recipe.specialisation ~= 0 and not ClientKnows(recipe.specialisation) then return false end
+    return not HasRecipeItem(recipe)
+end
+
+-- False until RecipeRadar has recorded known recipes; without that every recipe would look missing
+local function HasKnownList(prof)
+    local data = RR.Scanner:GetProfessionData(RR.Config:GetCurrentChar(), prof)
+    return data ~= nil and type(data.known) == "table" and next(data.known) ~= nil
+end
+
+-- Skill points above the current rank to include: none unless RecipeRadar's "Learnable Soon" is ticked
+local function SoonMargin()
+    if RR.Config:GetFilterSetting("learnableSoon") ~= true then return 0 end
+    return RR.LEARNABLE_SOON_MARGIN or 25
 end
 
 local function Run(force)
@@ -76,23 +158,32 @@ local function Run(force)
     local zoneName = RR.DB:GetZoneName(zoneId)
     local candidates = {}
 
+    local unscanned = {}
+    local level = UnitLevel("player")
+
     for _, prof in ipairs(learned) do
+        local scanned = HasKnownList(prof)
+        if not scanned then unscanned[#unscanned + 1] = prof end
         local rank = RR.Scanner:GetSkillRank(prof)
-        local maxSkill = rank and (rank + (RR.LEARNABLE_SOON_MARGIN or 25))
-        for _, recipe in ipairs(RR.DB:GetRecipesForProfession(prof)) do
+        local maxSkill = rank and (rank + SoonMargin())
+        for _, recipe in ipairs(scanned and RR.DB:GetRecipesForProfession(prof) or {}) do
             local spellId = recipe.id or recipe.spell_id
             local name = RR.DB:GetLocalizedText(recipe.name)
-            local needed = not RR.Scanner:IsRecipeKnown(prof, spellId, name)
-            if needed and cfg.learnableOnly and recipe.min_skill and maxSkill and recipe.min_skill > maxSkill then
-                needed = false
+            local needed = IsNeeded(prof, recipe, spellId, name)
+            if needed and cfg.learnableOnly then
+                -- like RecipeRadar's filter, an unknown requirement does not count as learnable
+                if maxSkill and (not recipe.min_skill or recipe.min_skill > maxSkill) then needed = false end
+                if recipe.min_xp_level and recipe.min_xp_level > level then needed = false end
             end
             if needed then
-                if recipe.trainers then CollectNpcs(SourceList(recipe.trainers), zoneId, ownFaction, candidates, prof) end
-                if recipe.vendors then CollectNpcs(SourceList(recipe.vendors), zoneId, ownFaction, candidates, prof) end
+                local label = name or ("spell " .. tostring(spellId))
+                local pickup = { key = prof .. ":" .. tostring(spellId or label), name = label, skill = recipe.min_skill }
+                if recipe.trainers then CollectNpcs(SourceList(recipe.trainers), zoneId, ownFaction, candidates, prof, pickup) end
+                if recipe.vendors then CollectNpcs(SourceList(recipe.vendors), zoneId, ownFaction, candidates, prof, pickup) end
                 if type(recipe.items) == "table" then
                     for _, itemId in ipairs(recipe.items) do
                         local item = RR.DB:GetItem(itemId)
-                        if item and item.vendors then CollectNpcs(SourceList(item.vendors), zoneId, ownFaction, candidates, prof) end
+                        if item and item.vendors then CollectNpcs(SourceList(item.vendors), zoneId, ownFaction, candidates, prof, pickup) end
                     end
                 end
             end
@@ -102,9 +193,13 @@ local function Run(force)
     local list = {}
     for _, entry in pairs(candidates) do list[#list + 1] = entry end
     table.sort(list, function(a, b)
-        if a.count ~= b.count then return a.count > b.count end
+        if #a.pickups ~= #b.pickups then return #a.pickups > #b.pickups end
         return a.npc.id < b.npc.id
     end)
+
+    if cfg.verbose and #unscanned > 0 then
+        Print("skipped " .. table.concat(unscanned, ", ") .. ": open that profession window once so known recipes can be read.")
+    end
 
     ClearWaypoints()
     local mapId = RR.Utils:FindMapIdByName(zoneName) or (C_Map and C_Map.GetBestMapForUnit and C_Map.GetBestMapForUnit("player"))
@@ -116,10 +211,7 @@ local function Run(force)
     local shown = 0
     for _, entry in ipairs(list) do
         if shown >= cfg.max then break end
-        local profNames = {}
-        for p in pairs(entry.profs) do profNames[#profNames + 1] = p end
-        table.sort(profNames)
-        local title = string.format("%s (%d: %s)", RR.DB:GetLocalizedText(entry.npc.name), entry.count, table.concat(profNames, ", "))
+        local title = BuildTitle(entry)
         local ok, uid = pcall(tomtom.AddWaypoint, tomtom, mapId, entry.x / 100, entry.y / 100,
             { title = title, from = ADDON, persistent = false })
         if ok and uid then placed[#placed + 1] = uid end
@@ -131,13 +223,15 @@ local function Run(force)
     end
 end
 
-local pending
+local pending, pendingForce
 local function Schedule(force)
+    pendingForce = pendingForce or force
     if pending then return end
     pending = true
     C_Timer.After(2, function()
-        pending = nil
-        local ok, err = pcall(Run, force)
+        local forced = pendingForce
+        pending, pendingForce = nil, nil
+        local ok, err = pcall(Run, forced)
         if not ok then Print("error: " .. tostring(err)) end
     end)
 end
@@ -145,7 +239,16 @@ end
 local frame = CreateFrame("Frame")
 frame:RegisterEvent("PLAYER_ENTERING_WORLD")
 frame:RegisterEvent("ZONE_CHANGED_NEW_AREA")
-frame:SetScript("OnEvent", function() Schedule(false) end)
+pcall(frame.RegisterEvent, frame, "NEW_RECIPE_LEARNED")
+-- learning a recipe refreshes the zone, so a waypoint that is no longer needed goes away
+frame:SetScript("OnEvent", function(_, event) Schedule(event == "NEW_RECIPE_LEARNED") end)
+
+-- ticking or clearing "Learnable Soon" in RecipeRadar refreshes the waypoints
+if hooksecurefunc and RR and RR.Config and RR.Config.SetFilterSetting then
+    hooksecurefunc(RR.Config, "SetFilterSetting", function(_, key)
+        if key == "learnableSoon" then Schedule(true) end
+    end)
+end
 
 SLASH_ZONERECIPEWAYPOINTS1 = "/zrw"
 SlashCmdList["ZONERECIPEWAYPOINTS"] = function(msg)
@@ -160,7 +263,7 @@ SlashCmdList["ZONERECIPEWAYPOINTS"] = function(msg)
         Print("all missing recipes in the zone. Run /zrw to refresh.")
     elseif cmd == "learnable" then
         cfg.learnableOnly = true
-        Print("only recipes learnable now or within " .. (RR and RR.LEARNABLE_SOON_MARGIN or 25) .. " skill points. Run /zrw to refresh.")
+        Print("only recipes learnable now, plus soon ones if \"Learnable Soon\" is ticked in RecipeRadar. Run /zrw to refresh.")
     elseif cmd == "max" and tonumber(arg) then
         cfg.max = math.max(1, math.min(60, math.floor(tonumber(arg))))
         Print("max waypoints per zone: " .. cfg.max)
