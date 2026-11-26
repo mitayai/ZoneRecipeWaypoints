@@ -14,6 +14,8 @@ Recipe data comes from the **RecipeRadar** addon.
   bank), or cannot use because of class or specialisation.
 - Includes "learnable soon" recipes only when **Learnable Soon** is ticked in RecipeRadar.
 - Refreshes when you learn a recipe.
+- Hides seasonal (holiday) recipes, both from the waypoints and from RecipeRadar's own list and
+  counts.
 
 ## Requirements
 
@@ -37,6 +39,7 @@ folder name `ZoneRecipeWaypoints`.
 | `/zrw learnable` | Only recipes within your skill and level (default) |
 | `/zrw all` | Ignore the skill and level limits |
 | `/zrw max N` | Most waypoints per zone, 1 to 60 (default 12) |
+| `/zrw seasonal` | Show or hide seasonal recipes (hidden by default) |
 | `/zrw quiet` | Toggle chat messages |
 | `/zrw clear` | Remove the waypoints |
 

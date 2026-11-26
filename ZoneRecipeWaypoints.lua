@@ -5,7 +5,7 @@ local RR = _G.RecipeRadar
 local PREFIX = "|cff33ccff" .. ADDON .. "|r: "
 local MAX_LABEL_RECIPES = 6
 
-local defaults = { enabled = true, learnableOnly = true, max = 12, verbose = true }
+local defaults = { enabled = true, learnableOnly = true, max = 12, verbose = true, hideSeasonal = true }
 local placed = {}
 local lastZoneId
 
@@ -17,6 +17,37 @@ local function Settings()
         if ZoneRecipeWaypointsDB[k] == nil then ZoneRecipeWaypointsDB[k] = v end
     end
     return ZoneRecipeWaypointsDB
+end
+
+-- Winter Veil patterns that RecipeRadar's data does not flag as holiday recipes
+local SEASONAL_IDS = { [44950] = true, [44953] = true, [44958] = true }
+
+local function IsSeasonal(recipe)
+    if recipe.holiday or SEASONAL_IDS[recipe.id] then return true end
+    for _, itemId in ipairs(type(recipe.items) == "table" and recipe.items or {}) do
+        local item = RR.DB:GetItem(itemId)
+        if item and item.holiday then return true end
+    end
+    return false
+end
+
+-- RecipeRadar's list and counts and our waypoints all read recipes through this one function,
+-- so filtering it here hides seasonal recipes everywhere without editing RecipeRadar's files
+if RR and RR.DB and RR.DB.GetRecipesForProfession then
+    local allRecipes = RR.DB.GetRecipesForProfession
+    local filtered = setmetatable({}, { __mode = "k" })
+    RR.DB.GetRecipesForProfession = function(db, profession)
+        local list = allRecipes(db, profession)
+        if #list == 0 or not Settings().hideSeasonal then return list end
+        if not filtered[list] then
+            local kept = {}
+            for _, recipe in ipairs(list) do
+                if not IsSeasonal(recipe) then kept[#kept + 1] = recipe end
+            end
+            filtered[list] = kept
+        end
+        return filtered[list]
+    end
 end
 
 local function ClearWaypoints()
@@ -267,6 +298,13 @@ SlashCmdList["ZONERECIPEWAYPOINTS"] = function(msg)
     elseif cmd == "max" and tonumber(arg) then
         cfg.max = math.max(1, math.min(60, math.floor(tonumber(arg))))
         Print("max waypoints per zone: " .. cfg.max)
+    elseif cmd == "seasonal" then
+        cfg.hideSeasonal = not cfg.hideSeasonal
+        if RR and RR.DB then RR.DB.totalRecipesCache = nil end
+        local window = RR and RR.UI and RR.UI.MainWindow
+        if window and window.IsShown and window:IsShown() then window:Refresh() end
+        Print(cfg.hideSeasonal and "seasonal recipes hidden." or "seasonal recipes shown.")
+        Schedule(true)
     elseif cmd == "quiet" then
         cfg.verbose = not cfg.verbose
         Print(cfg.verbose and "chat messages on." or "chat messages off.")
@@ -276,6 +314,6 @@ SlashCmdList["ZONERECIPEWAYPOINTS"] = function(msg)
     elseif cmd == "" or cmd == "run" then
         Schedule(true)
     else
-        Print("/zrw [run] | on | off | all | learnable | max N | quiet | clear")
+        Print("/zrw [run] | on | off | all | learnable | max N | seasonal | quiet | clear")
     end
 end
